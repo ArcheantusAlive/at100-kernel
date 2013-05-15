@@ -484,12 +484,12 @@ static void antares_keys_init(void)
 #endif
 
 #ifdef CONFIG_INPUT_GPIO_SWITCH
-#define GPIO_SWITCH(_id, _gpio, _name)    \
+#define GPIO_SWITCH(_id, _gpio, _name)		\
 	{					\
 		.code = _id,			\
 		.gpio = TEGRA_GPIO_##_gpio,	\
 		.active_low = 1,		\
-		.desc = #_name,      \
+		.desc = #_name,			\
 		.type = EV_SW,			\
 		.debounce_interval = 10,	\
 	}

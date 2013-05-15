@@ -6,7 +6,7 @@
 ** Description: 
 **     TouchSense Kernel Module main entry-point.
 **
-** Portions Copyright (c) 2008-2010 Immersion Corporation. All Rights Reserved. 
+** Portions Copyright (c) 2008-2011 Immersion Corporation. All Rights Reserved. 
 **
 ** This file contains Original Code and/or Modifications of Original Code 
 ** as defined in and that are subject to the GNU Public License v2 - 
@@ -48,7 +48,7 @@
 #endif
 
 /* Device name and version information */
-#define VERSION_STR " v3.4.55.5\n"                  /* DO NOT CHANGE - this is auto-generated */
+#define VERSION_STR " v3.4.55.8\n"                  /* DO NOT CHANGE - this is auto-generated */
 #define VERSION_STR_LEN 16                          /* account extra space for future extra digits in version number */
 static char g_szDeviceName[  (VIBE_MAX_DEVICE_NAME_LENGTH 
                             + VERSION_STR_LEN)
@@ -77,6 +77,11 @@ static VibeInt8 g_nForceLog[FORCE_LOG_BUFFER_SIZE];
 #error Unsupported Kernel version
 #endif
 
+#define HAVE_UNLOCKED_IOCTL
+#ifndef HAVE_UNLOCKED_IOCTL
+#define HAVE_UNLOCKED_IOCTL 0
+#endif
+
 #ifdef IMPLEMENT_AS_CHAR_DRIVER
 static int g_nMajor = 0;
 #endif
@@ -93,17 +98,24 @@ static int open(struct inode *inode, struct file *file);
 static int release(struct inode *inode, struct file *file);
 static ssize_t read(struct file *file, char *buf, size_t count, loff_t *ppos);
 static ssize_t write(struct file *file, const char *buf, size_t count, loff_t *ppos);
-//static int ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg);
-static long ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
+#ifdef HAVE_UNLOCKED_IOCTL
+static long unlocked_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
+#else
+static int ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg);
+#endif
 static struct file_operations fops = 
 {
-    .owner =    THIS_MODULE,
-    .read =     read,
-    .write =    write,
-    /*.ioctl =    ioctl,*/
-	.unlocked_ioctl = ioctl,
-    .open =     open,
-    .release =  release
+    .owner =            THIS_MODULE,
+    .read =             read,
+    .write =            write,
+#ifdef HAVE_UNLOCKED_IOCTL
+    .unlocked_ioctl =   unlocked_ioctl,
+#else
+    .ioctl =            ioctl,
+#endif
+    .open =             open,
+    .release =          release,
+    .llseek =           default_llseek    /* using default implementation as declared in linux/fs.h */
 };
 
 #ifndef IMPLEMENT_AS_CHAR_DRIVER
@@ -178,10 +190,9 @@ int __init tspdrv_init(void)
         DbgOut((KERN_ERR "tspdrv: platform_driver_register failed.\n"));
     }
 
-    DbgRecorderInit();
+    DbgRecorderInit(());
 
     ImmVibeSPI_ForceOut_Initialize();
-	
     VibeOSKernelLinuxInitTimer();
 
     /* Get and concatenate device name and initialize data buffer */
@@ -199,7 +210,7 @@ int __init tspdrv_init(void)
         g_SamplesBuffer[i].actuatorSamples[0].nBufferSize = 0;
         g_SamplesBuffer[i].actuatorSamples[1].nBufferSize = 0;
     }
-	
+
     return 0;
 }
 
@@ -270,11 +281,13 @@ static ssize_t read(struct file *file, char *buf, size_t count, loff_t *ppos)
 
     /* Update file position and return copied buffer size */
     *ppos += nBufSize;
+
     return nBufSize;
 }
 
 static ssize_t write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 {
+
     int i = 0;
 
     *ppos = 0;  /* file position not used, always set to 0 */
@@ -289,18 +302,18 @@ static ssize_t write(struct file *file, const char *buf, size_t count, loff_t *p
         return 0;
     }
 
+    /* Check buffer size */
+    if ((count <= SPI_HEADER_SIZE) || (count > SPI_BUFFER_SIZE))
+    {
+        DbgOut((KERN_ERR "tspdrv: invalid write buffer size.\n"));
+        return 0;
+    }
+
     /* Copy immediately the input buffer */
     if (0 != copy_from_user(g_cWriteBuffer, buf, count))
     {
         /* Failed to copy all the data, exit */
         DbgOut((KERN_ERR "tspdrv: copy_from_user failed.\n"));
-        return 0;
-    }
-
-    /* Check buffer size */
-    if ((count <= SPI_HEADER_SIZE) || (count > SPI_BUFFER_SIZE))
-    {
-        DbgOut((KERN_ERR "tspdrv: invalid write buffer size.\n"));
         return 0;
     }
 
@@ -397,17 +410,19 @@ static ssize_t write(struct file *file, const char *buf, size_t count, loff_t *p
     return count;
 }
 
-//static int ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
-static long ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+#ifdef HAVE_UNLOCKED_IOCTL
+static long unlocked_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+#else
+static int ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
+#endif
 {
 #ifdef QA_TEST
     int i;
 #endif
 
-	DbgOut((KERN_INFO "tspdrv: ioctl cmd[0x%x].\n", cmd));
-
     switch (cmd)
     {
+		DbgOut((KERN_INFO "tspdrv: ioctl cmd[0x%x].\n", cmd));
         case TSPDRV_STOP_KERNEL_TIMER:
             /* 
             ** As we send one sample ahead of time, we need to finish playing the last sample
@@ -435,7 +450,7 @@ static long ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
             break;
 
         case TSPDRV_MAGIC_NUMBER:
-            filp->private_data = (void*)TSPDRV_MAGIC_NUMBER;
+            file->private_data = (void*)TSPDRV_MAGIC_NUMBER;
             break;
 
         case TSPDRV_ENABLE_AMP:
@@ -476,7 +491,7 @@ static int suspend(struct platform_device *pdev, pm_message_t state)
 
 static int resume(struct platform_device *pdev) 
 {	
-	update_nvdock_in_status();
+    update_nvdock_in_status();
     DbgOut((KERN_INFO "tspdrv: resume.\n"));
 
 	return 0;   /* can resume */
